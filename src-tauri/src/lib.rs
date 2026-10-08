@@ -1,11 +1,9 @@
-use serde::Serialize;
-use serialport::SerialPort;
-use std::io::Write;
-use std::sync::Mutex;
+use serde::{Deserialize, Serialize};
+use serialport::{ClearBuffer, SerialPort};
+use std::{fs, io::Write};
 use std::time::Duration;
+use tauri::Manager;
 
-const BAUD_RATE: u32 = 38_400;
-const COMMAND_BAUD_RATE: u32 = 115_200;
 const LOG_SIZE: usize = 249;
 const LOG_END: u8 = 0x5A;
 
@@ -21,7 +19,93 @@ pub struct CableLog {
   connections: Vec<[u8; 2]>,
 }
 
-struct CommandPort(Mutex<Option<(String, Box<dyn SerialPort>)>>);
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CableDefinition {
+  id: u64,
+  name: String,
+  description: String,
+  pin_count: u8,
+  color: String,
+  expected_connections: Vec<[u8; 2]>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppSettings {
+  baud_rate: u32,
+  manual_port: String,
+  auto_connect: bool,
+  test_pull_mode: String,
+}
+
+fn app_data_file(app: &tauri::AppHandle, file_name: &str) -> Result<std::path::PathBuf, String> {
+  let app_data_dir = app
+    .path()
+    .app_data_dir()
+    .map_err(|error| format!("Unable to determine the application data directory: {error}"))?;
+  fs::create_dir_all(&app_data_dir)
+    .map_err(|error| format!("Unable to create the application data directory: {error}"))?;
+  Ok(app_data_dir.join(file_name))
+}
+
+fn cable_definitions_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+  app_data_file(app, "cable-definitions.json")
+}
+
+#[tauri::command]
+fn load_cable_definitions(app: tauri::AppHandle) -> Result<Vec<CableDefinition>, String> {
+  let path = cable_definitions_path(&app)?;
+  if !path.exists() {
+    return Ok(Vec::new());
+  }
+
+  let contents = fs::read_to_string(&path)
+    .map_err(|error| format!("Unable to read cable definitions: {error}"))?;
+  serde_json::from_str(&contents)
+    .map_err(|error| format!("Unable to parse cable definitions: {error}"))
+}
+
+#[tauri::command]
+fn save_cable_definitions(
+  app: tauri::AppHandle,
+  definitions: Vec<CableDefinition>,
+) -> Result<(), String> {
+  let path = cable_definitions_path(&app)?;
+  let contents = serde_json::to_string_pretty(&definitions)
+    .map_err(|error| format!("Unable to serialize cable definitions: {error}"))?;
+  fs::write(&path, contents).map_err(|error| format!("Unable to save cable definitions: {error}"))
+}
+
+#[tauri::command]
+fn load_settings(app: tauri::AppHandle) -> Result<Option<AppSettings>, String> {
+  let path = app_data_file(&app, "settings.json")?;
+  if !path.exists() {
+    return Ok(None);
+  }
+
+  let contents =
+    fs::read_to_string(&path).map_err(|error| format!("Unable to read settings: {error}"))?;
+  serde_json::from_str(&contents).map_err(|error| format!("Unable to parse settings: {error}"))
+}
+
+#[tauri::command]
+fn save_settings(app: tauri::AppHandle, settings: AppSettings) -> Result<(), String> {
+  let path = app_data_file(&app, "settings.json")?;
+  let contents = serde_json::to_string_pretty(&settings)
+    .map_err(|error| format!("Unable to serialize settings: {error}"))?;
+  fs::write(&path, contents).map_err(|error| format!("Unable to save settings: {error}"))
+}
+
+#[tauri::command]
+fn save_results_file(path: String, contents: String) -> Result<(), String> {
+  fs::write(&path, contents).map_err(|error| format!("Unable to save results: {error}"))
+}
+
+#[tauri::command]
+fn load_results_file(path: String) -> Result<String, String> {
+  fs::read_to_string(&path).map_err(|error| format!("Unable to open results: {error}"))
+}
 
 #[tauri::command]
 fn list_serial_ports() -> Result<Vec<SerialPortInfo>, String> {
@@ -42,11 +126,21 @@ fn list_serial_ports() -> Result<Vec<SerialPortInfo>, String> {
 }
 
 #[tauri::command]
-fn fetch_logs(port_name: String) -> Result<Vec<CableLog>, String> {
-  let mut port = serialport::new(&port_name, BAUD_RATE)
+fn fetch_logs(port_name: String, baud_rate: u32) -> Result<Vec<CableLog>, String> {
+  let mut port = serialport::new(&port_name, baud_rate)
     .timeout(Duration::from_millis(250))
     .open()
     .map_err(|error| format!("Unable to open {port_name}: {error}"))?;
+
+  port
+    .write_all(&[0x2A, 0x00, 0x00, 0x3A])
+    .and_then(|_| port.flush())
+    .map_err(|error| format!("Unable to reset log mode: {error}"))?;
+
+  std::thread::sleep(Duration::from_secs(2));
+  port
+    .clear(ClearBuffer::Input)
+    .map_err(|error| format!("Unable to clear the reset response: {error}"))?;
 
   port
     .write_all(&[0x2A, 0x00, 0x3A])
@@ -91,38 +185,20 @@ fn fetch_logs(port_name: String) -> Result<Vec<CableLog>, String> {
 }
 
 #[tauri::command]
-fn send_button_command(
-  state: tauri::State<'_, CommandPort>,
+fn send_device_command(
   port_name: String,
   command_byte: u8,
+  baud_rate: u32,
 ) -> Result<(), String> {
-  let mut command_port = state
-    .0
-    .lock()
-    .map_err(|_| "Command port state is unavailable".to_string())?;
+  let mut port = serialport::new(&port_name, baud_rate)
+    .timeout(Duration::from_millis(250))
+    .open()
+    .map_err(|error| format!("Unable to open {port_name}: {error}"))?;
 
-  if command_port
-    .as_ref()
-    .map(|(active_port, _)| active_port != &port_name)
-    .unwrap_or(true)
-  {
-    let port = serialport::new(&port_name, COMMAND_BAUD_RATE)
-      .open()
-      .map_err(|error| format!("Unable to open command port {port_name}: {error}"))?;
-    *command_port = Some((port_name.clone(), port));
-  }
-
-  let (_, port) = command_port
-    .as_mut()
-    .ok_or_else(|| "Command port is not open".to_string())?;
-
-  match port.write_all(&[0xA0, command_byte, 0xA1]) {
-    Ok(()) => Ok(()),
-    Err(error) => {
-      *command_port = None;
-      Err(format!("Unable to write button command to {port_name}: {error}"))
-    }
-  }
+  port
+    .write_all(&[0x0A, command_byte, 0x1A])
+    .and_then(|_| port.flush())
+    .map_err(|error| format!("Unable to send command: {error}"))
 }
 
 fn read_exact_with_timeout(port: &mut dyn SerialPort, buffer: &mut [u8]) -> Result<(), String> {
@@ -143,8 +219,17 @@ fn read_exact_with_timeout(port: &mut dyn SerialPort, buffer: &mut [u8]) -> Resu
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
   tauri::Builder::default()
-    .manage(CommandPort(Mutex::new(None)))
-    .invoke_handler(tauri::generate_handler![list_serial_ports, fetch_logs, send_button_command])
+    .invoke_handler(tauri::generate_handler![
+      list_serial_ports,
+      fetch_logs,
+      send_device_command,
+      load_cable_definitions,
+      save_cable_definitions,
+      load_settings,
+      save_settings,
+      save_results_file,
+      load_results_file
+    ])
     .setup(|app| {
       if cfg!(debug_assertions) {
         app.handle().plugin(
@@ -153,6 +238,7 @@ pub fn run() {
             .build(),
         )?;
       }
+      app.handle().plugin(tauri_plugin_dialog::init())?;
       Ok(())
     })
     .run(tauri::generate_context!())

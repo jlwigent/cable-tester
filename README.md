@@ -1,43 +1,45 @@
-# Svelte + Vite
+# Cable tester logs
 
-This template should help get you started developing with Svelte in Vite.
+A small Tauri utility for reading stored continuity-test logs from a PSA cable tester over a serial connection.
 
-## Recommended IDE Setup
+The application includes a cable-definition library for starting fresh test sessions, automatic detection of Silicon Labs CP210x USB-to-UART devices, session tabs, pin continuity results, and a manual device configuration panel for selecting a port, baud rate, and connection mode.
 
-[VS Code](https://code.visualstudio.com/) + [Svelte](https://marketplace.visualstudio.com/items?itemName=svelte.svelte-vscode).
+## Development
 
-## Need an official Svelte framework?
+Install the frontend dependencies, then start the Vite development server:
 
-Check out [SvelteKit](https://github.com/sveltejs/kit#readme), which is also powered by Vite. Deploy anywhere with its serverless-first approach and adapt to various platforms, with out of the box support for TypeScript, SCSS, and Less, and easily-added support for mdsvex, GraphQL, PostCSS, Tailwind CSS, and more.
-
-## Technical considerations
-
-**Why use this over SvelteKit?**
-
-- It brings its own routing solution which might not be preferable for some users.
-- It is first and foremost a framework that just happens to use Vite under the hood, not a Vite app.
-
-This template contains as little as possible to get started with Vite + Svelte, while taking into account the developer experience with regards to HMR and intellisense. It demonstrates capabilities on par with the other `create-vite` templates and is a good starting point for beginners dipping their toes into a Vite + Svelte project.
-
-Should you later need the extended capabilities and extensibility provided by SvelteKit, the template has been structured similarly to SvelteKit so that it is easy to migrate.
-
-**Why include `.vscode/extensions.json`?**
-
-Other templates indirectly recommend extensions via the README, but this file allows VS Code to prompt the user to install the recommended extension upon opening the project.
-
-**Why enable `checkJs` in the JS template?**
-
-It is likely that most cases of changing variable types in runtime are likely to be accidental, rather than deliberate. This provides advanced typechecking out of the box. Should you like to take advantage of the dynamically-typed nature of JavaScript, it is trivial to change the configuration.
-
-**Why is HMR not preserving my local component state?**
-
-HMR state preservation comes with a number of gotchas! It has been disabled by default in both `svelte-hmr` and `@sveltejs/vite-plugin-svelte` due to its often surprising behavior. You can read the details [here](https://github.com/sveltejs/svelte-hmr/tree/master/packages/svelte-hmr#preservation-of-local-state).
-
-If you have state that's important to retain within a component, consider creating an external store which would not be replaced by HMR.
-
-```js
-// store.js
-// An extremely simple external store
-import { writable } from 'svelte/store'
-export default writable(0)
+```bash
+npm install
+npm run dev
 ```
+
+To build the frontend:
+
+```bash
+npm run build
+```
+
+The log reader uses the tester's serial connection at **38400 baud, 8 data bits, no parity, and 1 stop bit**. Before requesting logs, it sends `0x2A 0x00 0x00 0x3A`, waits two seconds, discards the reset response, and then sends the log request `0x2A 0x00 0x3A`. It displays each log's pin matrix and connections.
+
+The same port can send test commands using the frame `0x0A 0xXX 0x1A`:
+
+- `0x00` powers on the tester.
+- Pin-count tests are available for 1, 4, 6, 7, 8, 9, 15, 19, 29, 34, and 40 pins.
+- `0xFF` deletes all stored logs.
+
+## Results files
+
+Use **Save results** to export a versioned JSON results file containing the session name,
+description, start time, test order, test names, timestamps, cable IDs, cable metadata
+snapshots, and continuity logs. Cable definitions remain in the local application library;
+when a saved cable ID is not available locally, the embedded snapshot is used as a
+read-only fallback.
+
+Use **Open results** to view a saved file without changing its test names or cable
+associations. Opening a file while a testing session is active requires confirmation
+and ends that session first.
+
+Results files use the `.ctresults` extension. Cable definition libraries can be
+exported and imported as `.cables` files from the cable definitions panel. Imports
+support selecting individual definitions and report ID conflicts before allowing
+the user to keep the local definition or replace it.
