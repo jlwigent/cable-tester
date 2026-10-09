@@ -6,12 +6,16 @@ The application includes a cable-definition library for starting fresh test sess
 
 ## Development
 
-Install the frontend dependencies, then start the Vite development server:
+Install the dependencies, then launch the desktop application in development mode:
 
 ```bash
 npm install
-npm run dev
+npm run tauri dev
 ```
+
+`npm run tauri dev` starts the Tauri application and its Vite frontend together. Use
+`npm run dev` only when you want to run the frontend in a browser without the native
+Tauri features.
 
 To build the frontend:
 
